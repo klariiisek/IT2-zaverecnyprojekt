@@ -1,142 +1,229 @@
 // public/main.js
-const socket = io();
-let myPlayerId = null;
-let currentPlayer = 1;
 
-// === KATEGORIE A BODY ===
-const categories = ['animals', 'geo', 'history', 'science'];
-const points = [100, 200, 300, 400, 500];
+const socket = io();  // připojím se na socket.io server
 
-// === VYTVOŘ GRID ===
-const grid = document.getElementById('grid');
-categories.forEach(cat => {
-  points.forEach(pt => {
-    const card = document.createElement('div');
-    card.classList.add('card');
-    card.setAttribute('data-id', `${cat}-${pt}`);
-    card.textContent = pt;
-    grid.appendChild(card);
+// proměnné pro stav hry
+let players = [];             // pole s objekty {id, name, score}
+let currentPlayerId = null;   // ID hráče, který je právě na tahu
+let categories = [];          // názvy kategorií z serveru
+let points = [];              // hodnoty bodů (100,200…)
+
+// 1) Přihlášení hráče – jednoduché okno s zadáním jména
+document
+  .getElementById('joinBtn')
+  .addEventListener('click', () => {
+    const name = document.getElementById('nickname').value.trim();
+    if (!name) {
+      // když je input prázdný, hráč musí zadat jméno
+      return alert('Zadej prosím jméno');
+    }
+    socket.emit('joinGame', name);                     // pošlu jméno serveru
+    document.getElementById('overlay').style.display = 'none'; // schovám overlay
   });
+
+// 2) Čekání na druhého hráče
+socket.on('waiting', () => {
+  // pokud je jen jeden hráč, zobrazíme zprávu
+  document.getElementById('currentTurn').textContent =
+    'Čeká se na druhého hráče…';
 });
 
-// === PŘIPOJ UDÁLOSTI NA KARTIČKY ===
-function attachCardListeners() {
-  document.querySelectorAll('.card').forEach(card => {
-    card.addEventListener('click', () => {
-      const cardId = card.getAttribute('data-id');
-      if (card.classList.contains('used')) return;
-      if (myPlayerId !== currentPlayer) {
-        alert("It's not your turn!");
-        return;
-      }
-      console.log(`Karta kliknuta: ${cardId} hráčem ${myPlayerId}`);
-      socket.emit('cardClicked', cardId);
-    });
-  });
-}
-attachCardListeners();
-
-// === SOCKETY ===
-socket.on('playerAssigned', (id) => {
-  myPlayerId = id;
-  document.getElementById('playerId').textContent = `You are Player ${id}`;
-  console.log("Moje ID:", myPlayerId);
+// 3) Když server pošle aktualizaci seznamu hráčů
+socket.on('updatePlayers', srv => {
+  players = srv;      // uložíme si nové pole hráčů
+  renderPlayers();    // překreslíme panel skóre
 });
 
-socket.on('gameFull', () => {
-  alert('Game is full. Only two players can join.');
+// 4) Start hry – přijde kategorie, body, hráči a první tah
+socket.on('startGame', data => {
+  categories      = data.categories;     // ['animals','geo',…]
+  points          = data.points;         // [100,200,300,400,500]
+  players         = data.players;        // [ {id,name,score}, … ]
+  currentPlayerId = data.currentTurnId;  // kdo je na tahu
+
+  renderPlayers();    // vykreslí jména + skóre
+  renderGrid();       // vykreslí grid s kartami
+  highlightTurn();    // zvýrazní aktivního hráče
+  attachGridListener(); // přidá listener pro kliknutí na karty
+
+  // zobrazíme, kdo je na tahu
+  const cur = players.find(p => p.id === currentPlayerId);
+  document.getElementById('currentTurn').textContent =
+    `Na tahu: ${cur.name}`;
 });
 
-socket.on('showQuestion', ({ cardId, by }) => {
-  const card = document.querySelector(`[data-id="${cardId}"]`);
-  if (card) {
-    card.classList.add('used');
-    showQuestion(cardId);
-  }
+// 5) Označení použité karty – přijde všem klientům
+socket.on('cardUsed', cardId => {
+  const c = document.querySelector(`[data-id="${cardId}"]`);
+  if (c) c.classList.add('used');  // zabarvíme kartu šedě
 });
 
-socket.on('updateScore', ({ playerId, isCorrect, points }) => {
-  const el = document.getElementById(`score${playerId}`);
-  const oldScore = parseInt(el.textContent) || 0;
-  if (isCorrect) el.textContent = oldScore + points;
-});
+// 6) Zobrazení otázky – jen hráči, který je na tahu
+socket.on(
+  'showQuestion',
+  ({ cardId, question, answers, correct }) => {
+    // naplníme otázku do modalu
+    document.getElementById('question').textContent =
+      decodeHTML(question);
 
-socket.on('changeTurn', ({ currentPlayer: cp }) => {
-  currentPlayer = cp;
-  document.getElementById('currentTurn').textContent = `Player ${cp}'s turn`;
-  console.log("Aktuální tah hráče:", currentPlayer);
-});
-
-socket.on('playerDisconnected', () => {
-  alert('Other player disconnected. Game reset.');
-  location.reload();
-});
-
-// === MODAL ===
-function showQuestion(cardId) {
-  fetchQuestion(cardId).then(({ question, answers, correct }) => {
-    document.getElementById('question').innerHTML = question;
     const answersDiv = document.getElementById('answers');
-    answersDiv.innerHTML = '';
+    answersDiv.innerHTML = '';   // vymažeme předchozí odpovědi
 
-    answers.forEach((answer) => {
+    // z cardId "animals-200" získám číslo bodů
+    const pts = parseInt(cardId.split('-')[1], 10);
+    const closeBtn = document.getElementById('closeModal');
+    closeBtn.disabled = true;    // hráč nesmí zavřít modal před odpovědí
+    document.getElementById('feedback').textContent = '';
+
+    // vytvoříme tlačítko pro každou možnost
+    answers.forEach(ans => {
       const btn = document.createElement('button');
-      btn.textContent = answer;
+      btn.textContent = decodeHTML(ans);
+      btn.dataset.answer = ans;
       btn.onclick = () => {
-        const isCorrect = answer === correct;
-        const points = parseInt(cardId.split('-')[1]);
-        document.getElementById('feedback').textContent = isCorrect ? "Correct!" : `Wrong! (${correct})`;
-        socket.emit('answerSubmitted', { isCorrect, points });
-        console.log(`Odpověď: ${answer}, Správně: ${isCorrect}`);
+        // po kliknutí deaktivujeme všechna tlačítka
+        answersDiv.querySelectorAll('button').forEach(b => {
+          b.disabled = true;
+          // zvýrazníme správnou (zelená) a vybranou špatnou (červená)
+          if (b.dataset.answer === correct) b.classList.add('correct');
+          if (b.dataset.answer === ans && ans !== correct)
+            b.classList.add('wrong');
+        });
+
+        // textový feedback pod tlačítky
+        document.getElementById('feedback').textContent =
+          ans === correct
+            ? `Správně! +${pts} b`
+            : `Špatně! Správná odpověď: ${decodeHTML(correct)}`;
+
+        socket.emit('answerSubmitted', {
+          cardId,
+          answer: ans
+        }); // pošleme odpověď serveru
+
+        closeBtn.disabled = false; // povolíme zavření modalu
       };
       answersDiv.appendChild(btn);
     });
 
+    // konečně modal otevřeme
     document.getElementById('modal').classList.remove('hidden');
-  }).catch(err => {
-    console.error('Chyba při získání otázky:', err);
-    alert('Nepodařilo se načíst otázku.');
+  }
+);
+
+// 7) Aktualizace skóre – jen text, barvy si necháme na highlightTurn
+socket.on('updateScore', ({ playerId, newScore }) => {
+  const pDiv = document.getElementById(`player-${playerId}`);
+  if (!pDiv) return;
+  const name = pDiv.dataset.name;  
+  pDiv.textContent = `${name}: ${newScore} b`;
+});
+
+// 8) Přepnutí tahu
+socket.on('changeTurn', ({ currentPlayer }) => {
+  currentPlayerId = currentPlayer;
+  highlightTurn();  // přemaže barvu u obou hráčů
+  // necháme modal otevřený, hráč ji zavře až po zodpovězení
+  const cur = players.find(p => p.id === currentPlayerId);
+  document.getElementById('currentTurn').textContent =
+    `Na tahu: ${cur.name}`;
+});
+
+// 9) Konec hry – jednoduchý alert s výsledky
+socket.on('gameOver', ({ winnerName, leaderboard }) => {
+  alert(
+    `Konec hry! Vítěz: ${winnerName}\n` +
+      leaderboard
+        .map(p => `${p.name}: ${p.score} b`)
+        .join('\n')
+  );
+});
+
+// ————————————————————————————————————————————————
+// HELPERS: funkce pro vykreslení a další drobnosti
+// ————————————————————————————————————————————————
+
+/**
+ * Vykreslí seznam hráčů se skóre
+ */
+function renderPlayers() {
+  const el = document.getElementById('scores');
+  el.innerHTML = '';
+  players.forEach(p => {
+    const d = document.createElement('div');
+    d.id = 'player-' + p.id;
+    d.dataset.name = p.name;
+    d.textContent = `${p.name}: ${p.score} b`;
+    el.appendChild(d);
   });
 }
 
-document.getElementById('closeModal').addEventListener('click', () => {
-  document.getElementById('modal').classList.add('hidden');
-  document.getElementById('feedback').textContent = '';
-});
+/**
+ * Vykreslí grid: nejdřív hlavičky kategorií, pak body
+ */
+function renderGrid() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
 
-// === FETCH OTÁZKY ===
-function fetchQuestion(cardId) {
-  const [category, points] = cardId.split('-');
-  const difficulty = getDifficultyFromPoints(points);
-  const categoryMap = {
-    animals: 27,
-    geo: 22,
-    history: 23,
-    science: 21
-  };
-  const url = `https://opentdb.com/api.php?amount=1&category=${categoryMap[category]}&difficulty=${difficulty}&type=multiple`;
-  console.log("URL dotazu:", url);
-  return fetch(url)
-    .then(res => res.json())
-    .then(data => {
-      console.log("Odpověď z API:", data);
-      if (!data.results || data.results.length === 0) {
-        throw new Error('Žádná otázka nenalezena.');
-      }
-      const q = data.results[0];
-      const allAnswers = [...q.incorrect_answers, q.correct_answer];
-      const shuffled = allAnswers.sort(() => Math.random() - 0.5);
-      return {
-        question: q.question,
-        answers: shuffled,
-        correct: q.correct_answer
-      };
+  // hlavičky sloupců
+  categories.forEach(cat => {
+    const h = document.createElement('div');
+    h.className = 'header-cell';
+    h.textContent = cat.toUpperCase();
+    grid.appendChild(h);
+  });
+
+  // řádky s body 100 → 500
+  points.forEach(pt => {
+    categories.forEach(cat => {
+      const card = document.createElement('div');
+      card.classList.add('card', cat); // přidáme i třídu kategorie
+      card.dataset.id = `${cat}-${pt}`;
+      card.textContent = pt;
+      grid.appendChild(card);
     });
+  });
 }
 
-function getDifficultyFromPoints(points) {
-  points = parseInt(points);
-  if (points <= 200) return 'easy';
-  if (points <= 400) return 'medium';
-  return 'hard';
+/**
+ * Přidá klikání na karty – jen renderGrid() je vytvoří
+ */
+function attachGridListener() {
+  document.getElementById('grid').addEventListener('click', e => {
+    const card = e.target.closest('.card');
+    if (!card || card.classList.contains('used')) return;
+    if (socket.id !== currentPlayerId) {
+      // zabráníme cizím tahům
+      return alert('Není tvůj tah!');
+    }
+    socket.emit('cardClicked', card.dataset.id);
+  });
 }
+
+/**
+ * Zvýrazní hráče, který je na tahu – zeleně, druhého červeně
+ */
+function highlightTurn() {
+  players.forEach(p => {
+    const el = document.getElementById('player-' + p.id);
+    if (!el) return;
+    el.style.color = p.id === currentPlayerId ? 'lime' : 'red';
+  });
+}
+
+/**
+ * Dekóduje HTML entity z API (OpenTDB posílá &quot; apod.)
+ */
+function decodeHTML(str) {
+  return new DOMParser()
+    .parseFromString(str, 'text/html')
+    .body.textContent;
+}
+
+// Zavírací tlačítko modalu – smaže feedback a schová modal
+document
+  .getElementById('closeModal')
+  .addEventListener('click', () => {
+    document.getElementById('modal').classList.add('hidden');
+    document.getElementById('feedback').textContent = '';
+  });

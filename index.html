@@ -7,16 +7,17 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>Jeopardy Quiz Game</header>
-
-  <div id="scores">
-    <div>Player 1: <span id="score1">0</span></div>
-    <div>Player 2: <span id="score2">0</span></div>
+  <!-- SIGN-IN OVERLAY -->
+  <div id="overlay">
+    <h2>Zadej své jméno</h2>
+    <input type="text" id="nickname" placeholder="Tvoje jméno" />
+    <button id="joinBtn">Připojit se</button>
   </div>
 
-  <div id="playerId"></div>
-  <div id="currentTurn">Waiting for players...</div>
+  <header>Jeopardy Quiz Game</header>
 
+  <div id="scores"></div>
+  <div id="currentTurn">Čeká se na hráče…</div>
   <div id="grid"></div>
 
   <div id="modal" class="hidden">
